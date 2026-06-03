@@ -212,18 +212,24 @@ The keyboard-input bridge into the focusable:false main overlay. A 1×1 transpar
 
 **Why two windows.** Splitting the two concerns onto separate windows lets each be configured optimally. Main overlay stays focusable:false (visible always, click-through). Proxy is focusable:true (always Wayland-focusable, never visible because it's 1×1 transparent at 0,0).
 
-**How forwarding works.** The proxy's `webContents` has a `before-input-event` handler that fires for every key. For each key:
+**How forwarding works.** The proxy's `webContents` has a `before-input-event` handler that fires for every key. For each Electron `keyDown` event (Electron's before-input-event empirically only fires for keyDown on our invisible focusable proxy under XWayland, never for keyUp), the handler does:
 
-1. **Printable single-char keys with no Ctrl/Alt/Meta modifier** (letters, digits, punctuation — including Shift+letter for capitals). Routed via `target.webContents.insertText(input.key)`. `insertText` inserts into the focused DOM element regardless of OS-level window focus, which is what we need since the main is never OS-focused.
-2. **`Escape`.** Routed to the `onEscape` callback passed in at construction (wired to `OverlayWindow.assertGameActive`), so the panel dismisses just like upstream's `handleExtraCommands` Escape path.
-3. **Special keys** (`Backspace`, `Delete`, `ArrowLeft`/`Right`, `Home`, `End`, `Enter`, and `ArrowUp`/`Down` on `<input type="number">`). Routed via `target.webContents.executeJavaScript(...)` with a small IIFE that finds `document.activeElement`, detects whether it supports the selection API (`<input type="number">` and others throw `InvalidStateError` on `selectionStart`), and either:
-   - Mutates `el.value` via `setRangeText` + dispatches an `input` event (Vue's v-model listens for `input`, so the binding updates) on selection-supporting inputs.
-   - Falls back to `el.value = ...slice...` for inputs that reject the selection API. The fallback supports Backspace and (on number inputs) ArrowUp/Down increment/decrement respecting `step`/`min`/`max`. Delete, arrow Left/Right, Home, End become no-ops on these inputs because there's no cursor position to act on.
-   - For Enter: textareas insert a newline; regular inputs dispatch a synthetic `keydown` so form-level Enter handlers can react.
+1. **`Escape`** — routed to the `onEscape` callback supplied at construction (wired to `OverlayWindow.assertGameActive`). Dismisses the panel just like upstream's `handleExtraCommands` Escape path.
+2. **Everything else** — dispatches a *pair* of synthetic events into the target's renderer via `target.webContents.executeJavaScript`: first a `keydown` `KeyboardEvent` with the original `key`/`code`/`ctrlKey`/`shiftKey`/`altKey`/`metaKey`, then a `keyup` with the same. The paired dispatch is the workaround for the missing-keyUp problem — components like `HotkeyInput.vue` listen on `@keyup` for hotkey-binding capture, and never see anything if we only forward keydown.
 
-**Why not `sendInputEvent`.** Electron docs explicitly require the BrowserWindow be focused for `sendInputEvent` to deliver. Our main never is. `insertText` + `executeJavaScript` route through Chromium layers that don't have that restriction.
+   The IIFE that runs in the renderer additionally mutates the focused element's value (mirroring the browser's default text-input behavior), but **only if the keydown wasn't preventDefault'd**. This is what makes `HotkeyInput.vue`'s `@keydown.prevent` work correctly: the hotkey field captures the keyup binding without us inserting the typed key into the value.
 
-**Not yet covered.** Modifier combos (Ctrl+A, Ctrl+C, Ctrl+V, Ctrl+X, Ctrl+Z) — these are normally handled by the browser's OS-level command dispatcher, which is gated on window focus. Tab focus traversal also doesn't propagate through `insertText`. See §6.
+   Value mutation in the IIFE:
+   - **Selection-API-supporting inputs** (regular text, textarea, email, search): printable chars via `el.setRangeText(key, start, end, 'end')`; Backspace/Delete via `setRangeText('', ...)` either over the highlighted range or the char before/after the cursor; arrows via `setSelectionRange`; Home/End to start/end; Enter inserts `\n` in textareas.
+   - **Inputs that reject the selection API** (`<input type="number">` and similar — `selectionStart` throws `InvalidStateError`): printable chars via `document.execCommand('insertText', false, key)`, which respects highlighted text even when the JS selection API doesn't expose it. Backspace via `document.execCommand('delete')` for the same reason. ArrowUp/Down on `type=number` implements increment/decrement respecting `step` / `min` / `max`. Delete, ArrowLeft/Right, Home, End: no-op (no cursor position available).
+
+   After mutation, an `input` event is dispatched on the element so Vue's v-model picks up the change.
+
+**Why not `sendInputEvent`.** Electron docs explicitly require the BrowserWindow be focused for `sendInputEvent` to deliver. Our main never is.
+
+**Why not `webContents.insertText` alone.** It bypasses the renderer's keydown handlers entirely, which breaks components like `HotkeyInput` that need to see a keyup with modifier state to capture hotkey bindings. The unified executeJavaScript IIFE gives us both: dispatched events first (so handlers can preventDefault to claim the key), then value mutation only if not claimed.
+
+**Not yet covered.** Modifier combos (Ctrl+A, Ctrl+C, Ctrl+V, Ctrl+X, Ctrl+Z) — these are normally handled by the browser's OS-level command dispatcher, which is gated on window focus. Tab focus traversal also doesn't propagate. See §6.
 
 ---
 
