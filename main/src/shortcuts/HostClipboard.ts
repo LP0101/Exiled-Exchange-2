@@ -1,8 +1,40 @@
+import { spawnSync } from "child_process";
 import { clipboard, Clipboard } from "electron";
+import { debug } from "../debug";
 import type { Logger } from "../RemoteLogger";
+import { isKdeWayland } from "../windowing/WaylandTracker";
 
 const POLL_DELAY = 48;
-const POLL_LIMIT = 500;
+const POLL_LIMIT = 1500;
+
+// Under native KDE Wayland the overlay process is XWayland; PoE2 is native
+// Wayland. Electron's clipboard.readText() reads the X11 CLIPBOARD, but
+// XWayland only lazily mirrors the Wayland selection into it (usually on a
+// focus change), so polling sees nothing during the action. Shell out to
+// wl-paste to read the Wayland selection directly.
+const USE_WL_PASTE = isKdeWayland();
+
+function readClipboardText(): string {
+  if (USE_WL_PASTE) {
+    const result = spawnSync("wl-paste", ["--no-newline"], {
+      encoding: "utf-8",
+      timeout: 100,
+    });
+    if (result.status === 0 && typeof result.stdout === "string") {
+      return result.stdout;
+    }
+    return "";
+  }
+  return clipboard.readText();
+}
+
+function writeClipboardText(text: string): void {
+  if (USE_WL_PASTE) {
+    spawnSync("wl-copy", [text], { timeout: 100 });
+    return;
+  }
+  clipboard.writeText(text);
+}
 
 // PoE must read clipboard within this timeframe,
 // after that we restore clipboard.
@@ -33,19 +65,22 @@ export class HostClipboard {
       return await this.pollPromise;
     }
 
-    let textBefore = clipboard.readText();
+    let textBefore = readClipboardText();
     if (isPoeItem(textBefore)) {
       textBefore = "";
-      clipboard.writeText("");
+      writeClipboardText("");
     }
 
     this.pollPromise = new Promise((resolve, reject) => {
       const poll = () => {
-        const textAfter = clipboard.readText();
+        const textAfter = readClipboardText();
+        debug(
+          `[ClipboardPoller] t=${this.elapsed}ms len=${textAfter.length} first40="${textAfter.slice(0, 40).replace(/\n/g, "\\n")}" isPoeItem=${!!isPoeItem(textAfter)}`,
+        );
 
         if (isPoeItem(textAfter)) {
           if (this.shouldRestore) {
-            clipboard.writeText(textBefore);
+            writeClipboardText(textBefore);
           }
           this.pollPromise = undefined;
           resolve(textAfter);
@@ -55,7 +90,7 @@ export class HostClipboard {
             setTimeout(poll, POLL_DELAY);
           } else {
             if (this.shouldRestore) {
-              clipboard.writeText(textBefore);
+              writeClipboardText(textBefore);
             }
             this.pollPromise = undefined;
 
@@ -82,11 +117,11 @@ export class HostClipboard {
     }
 
     this.isRestored = false;
-    const saved = clipboard.readText();
+    const saved = readClipboardText();
     cb(clipboard);
     setTimeout(() => {
       if (this.shouldRestore) {
-        clipboard.writeText(saved);
+        writeClipboardText(saved);
       }
       this.isRestored = true;
     }, RESTORE_AFTER);

@@ -1,0 +1,9 @@
+{
+  "name": "wayland-probe",
+  "private": true,
+  "version": "0.0.1",
+  "main": "probe.js",
+  "dependencies": {
+    "dbus-next": "^0.10.2"
+  }
+}

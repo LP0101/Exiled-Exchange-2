@@ -1,9 +1,6 @@
 import path from "path";
 import { BrowserWindow, dialog, shell, Menu } from "electron";
-import {
-  OverlayController,
-  OVERLAY_WINDOW_OPTS,
-} from "electron-overlay-window";
+import { OVERLAY_WINDOW_OPTS } from "electron-overlay-window";
 import type { ServerEvents } from "../server";
 import type { Logger } from "../RemoteLogger";
 import type { GameWindow } from "./GameWindow";
@@ -33,9 +30,24 @@ export class OverlayWindow {
 
     if (process.argv.includes("--no-overlay")) return;
 
+    // On KDE Wayland, electron-overlay-window's default Linux options leave
+    // the BrowserWindow focusable + with shadow + in taskbar. KWin appears
+    // to treat such windows as normal app windows and skips compositing
+    // them entirely when setIgnoreMouseEvents(true) is set. Match the
+    // settings the standalone wayland-probe used (which DID render visibly
+    // with click-through enabled) — focusable:false, skipTaskbar:true,
+    // hasShadow:false.
+    const isLinux = process.platform === "linux";
     this.window = new BrowserWindow({
       icon: path.join(__dirname, process.env.STATIC!, "icon.png"),
       ...OVERLAY_WINDOW_OPTS,
+      ...(isLinux
+        ? {
+            focusable: false,
+            skipTaskbar: true,
+            hasShadow: false,
+          }
+        : {}),
       width: 800,
       height: 600,
       webPreferences: {
@@ -84,10 +96,16 @@ export class OverlayWindow {
     }
   }
 
+  // Live cursor position. Delegates to GameWindow which uses the WaylandTracker
+  // feed on Wayland (Electron's API returns frozen coords there).
+  getCursorPoint(): { x: number; y: number } {
+    return this.poeWindow.getCursorPoint();
+  }
+
   assertOverlayActive = () => {
     if (!this.isInteractable) {
       this.isInteractable = true;
-      OverlayController.activateOverlay();
+      this.poeWindow.activateOverlay();
       this.poeWindow.isActive = false;
     }
   };
@@ -95,7 +113,7 @@ export class OverlayWindow {
   assertGameActive = () => {
     if (this.isInteractable) {
       this.isInteractable = false;
-      OverlayController.focusTarget();
+      this.poeWindow.focusTarget();
       this.poeWindow.isActive = true;
     }
   };

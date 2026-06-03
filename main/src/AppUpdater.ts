@@ -24,7 +24,13 @@ export class AppUpdater {
   }
 
   constructor(private server: ServerEvents) {
-    setInterval(this.check, 16 * 60 * 60 * 1000);
+    const updatesDisabled = process.argv.includes("--no-updates");
+    // Skip the periodic check loop entirely when updates are disabled — no
+    // network requests, no notifications. The user can still trigger a
+    // manual check via the "check-for-update" client action.
+    if (!updatesDisabled) {
+      setInterval(this.check, 16 * 60 * 60 * 1000);
+    }
 
     this.server.onEventAnyClient("CLIENT->MAIN::user-action", ({ action }) => {
       if (action === "check-for-update") {
@@ -39,7 +45,7 @@ export class AppUpdater {
 
     if (!autoUpdater.autoDownload || process.platform === "darwin") {
       this.noAutoUpdatesReason = "not-supported";
-    } else if (process.argv.includes("--no-updates")) {
+    } else if (updatesDisabled) {
       autoUpdater.autoDownload = false;
       this.noAutoUpdatesReason = "disabled-by-flag";
     }
@@ -67,6 +73,7 @@ export class AppUpdater {
   }
 
   checkAtStartup() {
+    if (process.argv.includes("--no-updates")) return;
     if (!this._checkedAtStartup) {
       this._checkedAtStartup = true;
       this.check();

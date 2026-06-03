@@ -23,6 +23,9 @@ yarn-error.log*
 # Electron-builder output
 /dist_electron
 
+# Wayland probe runtime state (created by load-kwin-script.sh)
+wayland-probe/.kwin-script-id
+
 # vitepress
 docs/.vitepress/dist
 docs/.vitepress/cache

@@ -3,6 +3,15 @@ import type { ServerEvents } from "../server";
 import type { GameConfig } from "../host-files/GameConfig";
 import type { OverlayWindow } from "./OverlayWindow";
 
+// The "hold Alt → hide overlay UI" feature is designed for X11 input where
+// physical keypresses are the only source. On Linux Wayland (with our setup),
+// hotkey actions synthesize Alt+C via ydotool to perform the in-game copy.
+// Those kernel-level synthesized events briefly look like Alt-alone to
+// uiohook and trigger makeInvisible(), hiding the overlay UI (including the
+// widget we just tried to show). Skip the feature on Linux until we have
+// a way to filter synthesized events from physical ones.
+const ENABLE_ALT_HIDES_UI = process.platform !== "linux";
+
 export class OverlayVisibility {
   private timerId: NodeJS.Timeout | undefined;
   private isOverlayVisible = true;
@@ -12,6 +21,7 @@ export class OverlayVisibility {
     private overlay: OverlayWindow,
     private gameConfig: GameConfig,
   ) {
+    if (!ENABLE_ALT_HIDES_UI) return;
     uIOhook.on("keydown", (e) => {
       if (
         e.altKey &&

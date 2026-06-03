@@ -66,7 +66,7 @@ let tray: AppTray;
     tray = new AppTray(eventPipe);
     const logger = new Logger(eventPipe);
     const gameConfig = new GameConfig(eventPipe, logger);
-    const poeWindow = new GameWindow();
+    const poeWindow = new GameWindow(logger);
     const appUpdater = new AppUpdater(eventPipe);
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const _httpProxy = new HttpProxy(server, logger);

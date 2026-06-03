@@ -1,4 +1,57 @@
-# ![Perfect Jewelers Orb](./renderer/public/images/jeweler.png) Exiled Exchange 2
+# ![Perfect Jewelers Orb](./renderer/public/images/jeweler.png) Exiled Exchange 2 — KDE Wayland fork
+
+## About this fork
+
+This is a downstream fork of [Kvan7/exiled-exchange-2](https://github.com/Kvan7/exiled-exchange-2) that adds **native KDE Plasma 6 Wayland support** so PoE2 can run as a native Wayland client (and get HDR) while the overlay still works. Upstream targets Windows and X11 / XWayland-only Linux.
+
+What this fork changes:
+
+- **Native KDE Wayland backend.** A new `WaylandTracker` ([`main/src/windowing/WaylandTracker.ts`](main/src/windowing/WaylandTracker.ts)) loads a KWin script that reports PoE2's geometry, focus state, and cursor position via DBus, replacing the X11 `electron-overlay-window` attach (which can't see a native-Wayland PoE2 window).
+- **Hotkeys via KWin's `registerShortcut`** instead of `globalShortcut.register`. KWin filters Ctrl+letter combos out of XWayland's keyboard stream, so the X11 grab never fires; binding at the compositor level is the only way to claim them.
+- **Input synthesis via [`ydotool`](https://github.com/ReimuNotMoe/ydotool)** for the Ctrl+C item-copy step. Wayland clients don't see X11 `XTest`-synthesized events; ydotool writes to `/dev/uinput` at the kernel level so PoE2 receives it like a real keypress.
+- **Clipboard read via `wl-paste`** (from `wl-clipboard`). Electron's `clipboard.readText()` reads the X11 CLIPBOARD selection which XWayland only lazy-mirrors from PoE2's Wayland selection.
+- **Cursor hover detection** via KWin's `workspace.cursorPosChanged` signal forwarded through DBus — needed because `screen.getCursorScreenPoint()` returns frozen coords while PoE2 owns the pointer.
+- **AppImage build with auto-update disabled.** The `--no-updates` flag is baked into the AppImage's `.desktop` Exec line so background update checks never run.
+
+### Runtime requirements
+
+- **KDE Plasma 6** (Wayland session). Plasma 5 won't work — the KWin script API is different.
+- **`ydotool` + `ydotoold` user service** running before launch:
+  ```bash
+  sudo pacman -S ydotool          # Arch / Cachy
+  sudo apt install ydotool        # Debian / Ubuntu
+  systemctl --user enable --now ydotoold
+  ```
+- **`wl-clipboard`**:
+  ```bash
+  sudo pacman -S wl-clipboard
+  sudo apt install wl-clipboard
+  ```
+- Path of Exile 2 launched as a **native Wayland client** (use Steam's Proton with `PROTON_ENABLE_WAYLAND=1` and a Proton GE / Proton hotfix build that supports it).
+- The overlay itself must run **under XWayland** (`ELECTRON_OZONE_PLATFORM_HINT=x11`). The AppImage handles this for you.
+
+### Launching
+
+If you launch from the desktop entry, the `.desktop` file already passes the right flags. From a shell:
+
+```bash
+ELECTRON_OZONE_PLATFORM_HINT=x11 \
+XDG_SESSION_TYPE=x11 \
+"./Exiled Exchange 2-0.15.3.AppImage" --no-updates
+```
+
+### Known limitations
+
+- **Start this app before Discord** (or any other Electron app that registers `Ctrl + D` — Slack, VS Code, etc.). KGlobalAccel uses first-come-first-served for global shortcut bindings: whichever process registers first wins, and later `register` calls succeed silently without actually claiming the key. So if you launch the overlay first, you can start Discord any time after and Discord's "toggle deafen" binding simply no-ops while ours keeps working. If Discord starts first, you'd need to restart this app (after closing Discord) to claim the key back. See [`WAYLAND-NATIVE-NOTES.md`](WAYLAND-NATIVE-NOTES.md) for details.
+- **`Alt + letter` hotkeys won't work** — the built-in "hold Alt to hide the overlay UI" feature is disabled on Linux because ydotool's synthesized Alt confuses the detection. Use Ctrl-based hotkeys instead.
+- **Screenshot-based OCR features** (heist gems) are not implemented on Wayland; they're already gated to Windows in upstream so nothing user-visible changes.
+- **KDE only.** sway/Hyprland/GNOME would each need a separate compositor backend; the architecture supports it but isn't built yet.
+
+For the full picture — every file changed, why it was changed, the architecture, troubleshooting / recovery commands, and the Phase 2 distribution plan — see [`WAYLAND-NATIVE-NOTES.md`](WAYLAND-NATIVE-NOTES.md).
+
+---
+
+## Upstream description
 
 [![GitHub Downloads (specific asset, latest release)](https://img.shields.io/github/downloads/kvan7/exiled-exchange-2/latest/Exiled-Exchange-2-Setup-0.15.3.exe?style=plastic&link=https%3A%2F%2Ftooomm.github.io%2Fgithub-release-stats%2F%3Fusername%3Dkvan7%26repository%3DExiled-Exchange-2)](https://tooomm.github.io/github-release-stats/?username=kvan7&repository=Exiled-Exchange-2)
 [![GitHub Tag](https://img.shields.io/github/v/tag/kvan7/exiled-exchange-2?style=plastic&label=latest%20version)](https://github.com/Kvan7/Exiled-Exchange-2/releases/latest)
