@@ -4,11 +4,18 @@ import { OVERLAY_WINDOW_OPTS } from "electron-overlay-window";
 import type { ServerEvents } from "../server";
 import type { Logger } from "../RemoteLogger";
 import type { GameWindow } from "./GameWindow";
+import { InputProxy } from "./InputProxy";
 
 export class OverlayWindow {
   public isInteractable = false;
   public wasUsedRecently = true;
   private window?: BrowserWindow;
+  // KDE Wayland only. See InputProxy for the rationale; in short, the main
+  // window is focusable:false (needed for visibility above PoE2's fullscreen
+  // Wayland surface), so we can't receive keyboard input directly. The proxy
+  // is an invisible focusable window that grabs Wayland keyboard focus on
+  // our behalf and forwards keystrokes into the main window via sendInputEvent.
+  private inputProxy?: InputProxy;
   private overlayKey: string = "Shift + Space";
   private isOverlayKeyUsed = false;
 
@@ -77,6 +84,10 @@ export class OverlayWindow {
       shell.openExternal(details.url);
       return { action: "deny" };
     });
+
+    if (isLinux) {
+      this.inputProxy = new InputProxy(this.window, this.assertGameActive);
+    }
   }
 
   loadAppPage(port: number) {
@@ -107,6 +118,7 @@ export class OverlayWindow {
       this.isInteractable = true;
       this.poeWindow.activateOverlay();
       this.poeWindow.isActive = false;
+      this.inputProxy?.show();
     }
   };
 
@@ -115,6 +127,7 @@ export class OverlayWindow {
       this.isInteractable = false;
       this.poeWindow.focusTarget();
       this.poeWindow.isActive = true;
+      this.inputProxy?.hide();
     }
   };
 
@@ -192,6 +205,10 @@ export class OverlayWindow {
   private handlePoeWindowActiveChange = (isActive: boolean) => {
     if (isActive && this.isInteractable) {
       this.isInteractable = false;
+      // PoE2 reclaimed focus (e.g. user clicked into the game area) — drop
+      // the proxy so it doesn't keep stealing keyboard focus on next focus
+      // change.
+      this.inputProxy?.hide();
     }
     this.server.sendEventTo("broadcast", {
       name: "MAIN->OVERLAY::focus-change",

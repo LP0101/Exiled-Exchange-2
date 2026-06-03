@@ -11,6 +11,7 @@ What this fork changes:
 - **Input synthesis via [`ydotool`](https://github.com/ReimuNotMoe/ydotool)** for the Ctrl+C item-copy step. Wayland clients don't see X11 `XTest`-synthesized events; ydotool writes to `/dev/uinput` at the kernel level so PoE2 receives it like a real keypress.
 - **Clipboard read via `wl-paste`** (from `wl-clipboard`). Electron's `clipboard.readText()` reads the X11 CLIPBOARD selection which XWayland only lazy-mirrors from PoE2's Wayland selection.
 - **Cursor hover detection** via KWin's `workspace.cursorPosChanged` signal forwarded through DBus — needed because `screen.getCursorScreenPoint()` returns frozen coords while PoE2 owns the pointer.
+- **Text input forwarding for overlay panels.** The main overlay BrowserWindow has to be constructed `focusable: false` so KWin will composite it above PoE2's fullscreen surface — but that means it can't receive keyboard events. A second 1×1 invisible `focusable: true` BrowserWindow (the "InputProxy") grabs Wayland keyboard focus while a panel is interactive and forwards each keystroke into the main overlay via `webContents.insertText` / `executeJavaScript`. Lets you type into settings / search fields normally.
 - **AppImage build with auto-update disabled.** The `--no-updates` flag is baked into the AppImage's `.desktop` Exec line so background update checks never run.
 
 ### Runtime requirements
@@ -44,6 +45,8 @@ XDG_SESSION_TYPE=x11 \
 
 - **Start this app before Discord** (or any other Electron app that registers `Ctrl + D` — Slack, VS Code, etc.). KGlobalAccel uses first-come-first-served for global shortcut bindings: whichever process registers first wins, and later `register` calls succeed silently without actually claiming the key. So if you launch the overlay first, you can start Discord any time after and Discord's "toggle deafen" binding simply no-ops while ours keeps working. If Discord starts first, you'd need to restart this app (after closing Discord) to claim the key back. See [`WAYLAND-NATIVE-NOTES.md`](WAYLAND-NATIVE-NOTES.md) for details.
 - **`Alt + letter` hotkeys won't work** — the built-in "hold Alt to hide the overlay UI" feature is disabled on Linux because ydotool's synthesized Alt confuses the detection. Use Ctrl-based hotkeys instead.
+- **Some text-input keys don't forward.** Letters, digits, symbols, Backspace, Delete, arrow keys, Home, End, Enter, and Escape all work in overlay text fields. Modifier combos like `Ctrl+A` (select all), `Ctrl+C` / `Ctrl+V` / `Ctrl+X` (clipboard), and Tab focus-traversal are not forwarded — these need OS-level command dispatch that Chromium gates on window focus. Use right-click context menus or mouse for those.
+- **Mouse cursor disappears over a focused number input** — a Chromium/XWayland cursor-protocol quirk with non-focusable windows. Typing still works; only the visible mouse cursor is missing while hovering the field. Comes back when you move off.
 - **Screenshot-based OCR features** (heist gems) are not implemented on Wayland; they're already gated to Windows in upstream so nothing user-visible changes.
 - **KDE only.** sway/Hyprland/GNOME would each need a separate compositor backend; the architecture supports it but isn't built yet.
 

@@ -70,6 +70,8 @@ Two key insights:
 - KWin is bilingual — it can talk to Wayland clients (PoE2) AND XWayland clients (our overlay). It just doesn't bridge between them in most places. We use KWin's *script* facility (a JS sandbox inside KWin) as the bridge, because that's the only thing that has access to both sides.
 - Input synthesis is the one place the script can't help — KWin scripts have no API for typing keys into focused clients. So we go around KWin entirely and write to `/dev/uinput` via `ydotool`.
 
+There's a second, mostly-orthogonal flow for **keyboard input into the overlay** (typing into settings / search / browser text fields), handled by an invisible secondary BrowserWindow — the **InputProxy** (§3.17). The main overlay BrowserWindow is constructed `focusable: false` so KWin will composite it above PoE2's fullscreen surface; the trade-off is KWin never routes keyboard events to it. The InputProxy is a 1×1 transparent `focusable: true` window that grabs Wayland keyboard focus on activation and forwards each keystroke into the main overlay via `webContents.insertText` (printable chars) or `webContents.executeJavaScript` synthesising on `document.activeElement` (Backspace, Delete, arrows, Enter). Active only while an interactive panel is up; hidden when focus returns to PoE2.
+
 ---
 
 ## 3. Files changed / added
@@ -127,10 +129,11 @@ When that returns true, the constructor instantiates a `WaylandTracker`. All pub
 
 ### 3.5 Modified: `main/src/windowing/OverlayWindow.ts`
 
-Three changes:
+Four changes:
 
 1. **Construction options on Linux.** Adds `focusable: false`, `skipTaskbar: true`, `hasShadow: false` on top of `OVERLAY_WINDOW_OPTS`. Without `focusable: false`, KWin treats the BrowserWindow as a "normal" app window and skips compositing it whenever `setIgnoreMouseEvents(true)` is set — the window exists but is invisible. The standalone `wayland-probe/` scaffolding confirmed this combination produces a visible click-through window.
 2. **Two `OverlayController` calls replaced** with `poeWindow.activateOverlay()` / `poeWindow.focusTarget()`. The actual platform-specific logic moved into `GameWindow` (see §3.4).
+3. **InputProxy construction and lifecycle** (Linux only). After the main BrowserWindow is created, instantiate `new InputProxy(this.window, this.assertGameActive)`. The proxy is shown in `assertOverlayActive()` (right after `poeWindow.activateOverlay()`) and hidden in `assertGameActive()` (right after `poeWindow.focusTarget()`). Also hidden inside `handlePoeWindowActiveChange` when PoE2 reclaims focus by other means (e.g. user clicks the game area). See §3.17 for the proxy itself.
 
 ### 3.6 Modified: `main/src/windowing/OverlayVisibility.ts`
 
@@ -200,6 +203,27 @@ Adds `dbus-next` as a runtime dependency. Pure JS, no native build step.
 ### 3.16 New: `wayland-probe/`
 
 Standalone Electron + DBus scaffolding used during development to verify each capability (compositing, setBounds, click-through, hotkey delivery, KWin scripting, DBus IPC) independently before integrating into the main app. Kept in the repo as a reference / diagnostic tool. Can be deleted if disk space matters; nothing in the shipping product depends on it.
+
+### 3.17 New: `main/src/windowing/InputProxy.ts`
+
+The keyboard-input bridge into the focusable:false main overlay. A 1×1 transparent `focusable: true` BrowserWindow positioned at the screen origin, hidden by default, shown only when an interactive panel is up.
+
+**Why it exists.** The main overlay's `focusable: false` is load-bearing for visibility — without it, KWin treats us as a peer app window and PoE2's fullscreen surface stacks above us. The cost is that KWin never grants keyboard focus to a focusable:false window, so a click into a text input lands the visual cursor (mouse-driven selection still works) but typing produces nothing. `setFocusable(true)` at runtime doesn't repair this — Electron's flag flips but X11 `WM_HINTS.input=False` persists in KWin's grant table. Single-window approaches with `type: 'notification'`, aggressive `setAlwaysOnTop("screen-saver")`, the KWin-script `keepAbove` flag, and `moveTop()` were all tested and none let an XWayland window stack above PoE2's Wayland-native fullscreen surface; only `focus()` reliably did, and `focus()` requires focusable:true.
+
+**Why two windows.** Splitting the two concerns onto separate windows lets each be configured optimally. Main overlay stays focusable:false (visible always, click-through). Proxy is focusable:true (always Wayland-focusable, never visible because it's 1×1 transparent at 0,0).
+
+**How forwarding works.** The proxy's `webContents` has a `before-input-event` handler that fires for every key. For each key:
+
+1. **Printable single-char keys with no Ctrl/Alt/Meta modifier** (letters, digits, punctuation — including Shift+letter for capitals). Routed via `target.webContents.insertText(input.key)`. `insertText` inserts into the focused DOM element regardless of OS-level window focus, which is what we need since the main is never OS-focused.
+2. **`Escape`.** Routed to the `onEscape` callback passed in at construction (wired to `OverlayWindow.assertGameActive`), so the panel dismisses just like upstream's `handleExtraCommands` Escape path.
+3. **Special keys** (`Backspace`, `Delete`, `ArrowLeft`/`Right`, `Home`, `End`, `Enter`, and `ArrowUp`/`Down` on `<input type="number">`). Routed via `target.webContents.executeJavaScript(...)` with a small IIFE that finds `document.activeElement`, detects whether it supports the selection API (`<input type="number">` and others throw `InvalidStateError` on `selectionStart`), and either:
+   - Mutates `el.value` via `setRangeText` + dispatches an `input` event (Vue's v-model listens for `input`, so the binding updates) on selection-supporting inputs.
+   - Falls back to `el.value = ...slice...` for inputs that reject the selection API. The fallback supports Backspace and (on number inputs) ArrowUp/Down increment/decrement respecting `step`/`min`/`max`. Delete, arrow Left/Right, Home, End become no-ops on these inputs because there's no cursor position to act on.
+   - For Enter: textareas insert a newline; regular inputs dispatch a synthetic `keydown` so form-level Enter handlers can react.
+
+**Why not `sendInputEvent`.** Electron docs explicitly require the BrowserWindow be focused for `sendInputEvent` to deliver. Our main never is. `insertText` + `executeJavaScript` route through Chromium layers that don't have that restriction.
+
+**Not yet covered.** Modifier combos (Ctrl+A, Ctrl+C, Ctrl+V, Ctrl+X, Ctrl+Z) — these are normally handled by the browser's OS-level command dispatcher, which is gated on window focus. Tab focus traversal also doesn't propagate through `insertText`. See §6.
 
 ---
 
@@ -321,6 +345,10 @@ That re-enables `[WaylandTracker]`, `[GameWindow]`, `[Shortcuts]`, `[InputSynth]
 - **Screenshot / OCR features** (heist gems) — not implemented on Wayland. The only existing caller is already win32-gated upstream, so no user-visible regression.
 - **Discord race for `Ctrl + D`** — §5.1.
 - **Orphan KGlobalAccel entries on rebind** — the `hk-N` action names reshuffle when shortcut count changes, leaving an idle entry behind. Cosmetic, doesn't affect functionality.
+- **Mouse cursor disappears over focused `<input type="number">`** — a Chromium/XWayland cursor-protocol quirk with focusable:false windows. The cursor renegotiation that fires when a number input gains focus is dropped. Cursor reappears when leaving the input. Typing still works; only the visible cursor is missing. Not caused by the InputProxy split — reproduces with the proxy disabled too.
+- **Modifier combos (Ctrl+A, Ctrl+C, Ctrl+V, Ctrl+X, Ctrl+Z) in overlay text fields** — not forwarded. These are normally dispatched by the browser's OS command path, which requires window focus. Clipboard ops also need a route to the Wayland selection. Workaround: copy text outside the overlay or rely on right-click context menus.
+- **Tab key for focus traversal in overlay panels** — currently ignored by the InputProxy. Use the mouse to switch fields.
+- **Forwarding hover steals keyboard from PoE2 briefly** — when the cursor enters a price-check widget area, `assertOverlayActive` triggers `inputProxy.show()` which moves Wayland keyboard focus to the proxy. PoE2 stops responding to keystrokes for that interval. Reverts on cursor leave. Side effect of the simpler "always show proxy when interactive" hook; renderer-side focus tracking could narrow the window if it ever matters.
 - **KDE only** — sway / Hyprland / GNOME each need their own compositor backend (foreign-toplevel-management protocol on wlroots, GNOME extension on GNOME). The architecture supports it but isn't built.
 - **HDR + multi-monitor edge cases** — unverified, expected to be fine on KWin 6.
 
