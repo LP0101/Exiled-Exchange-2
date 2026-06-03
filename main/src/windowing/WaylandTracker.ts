@@ -43,6 +43,16 @@ function trackPoe(w) {
   if (w.frameGeometryChanged) {
     w.frameGeometryChanged.connect(function () { emitGeometry(w); });
   }
+  // Listen for PoE2's own active state changes. This is more reliable
+  // than workspace.windowActivated (which fires for ANY window becoming
+  // active and can leave us in the wrong state when intermediate windows
+  // — notifications, daemons, our own proxy — briefly take focus
+  // without KWin emitting a clean re-activation for PoE2 afterwards).
+  if (w.activeChanged) {
+    w.activeChanged.connect(function () {
+      call("Focus", !!w.active);
+    });
+  }
   if (w.closed) {
     w.closed.connect(function () { call("Present", false); });
   }
@@ -62,13 +72,9 @@ if (added) {
   added.connect(function (w) { if (isPoeWindow(w)) trackPoe(w); });
 }
 
-// Focus tracking
-var activated = workspace.windowActivated || workspace.clientActivated;
-if (activated) {
-  activated.connect(function (w) {
-    call("Focus", !!(w && isPoeWindow(w)));
-  });
-}
+// Focus tracking is done per-PoE-window via w.activeChanged inside
+// trackPoe (see comment there for why workspace-level activation events
+// proved unreliable).
 
 // Cursor position feed. uiohook doesn't see mousemove while PoE2 owns the
 // pointer (KWin doesn't forward to XWayland), and Electron's
@@ -133,6 +139,12 @@ export class WaylandTracker extends EventEmitter {
   // TEMP debug
   _cursorLogCount: number | undefined = undefined;
   private _shortcuts: string[] = [];
+  // When pauseShortcuts() is called we stash the active list here and
+  // reload the script with no registrations, so KWin stops grabbing
+  // those keys at the compositor level. resumeShortcuts() restores.
+  // While paused, setShortcuts updates this instead of triggering a
+  // reload (we still want the new list applied — just not until resume).
+  private _pausedShortcuts: string[] | null = null;
   private bus: dbus.MessageBus | null = null;
   private scriptPath: string | null = null;
   private scriptId: number | null = null;
@@ -200,6 +212,12 @@ export class WaylandTracker extends EventEmitter {
     debug(
       `[WaylandTracker] setShortcuts called with ${sorted.length}: ${JSON.stringify(sorted)}`,
     );
+    if (this._pausedShortcuts !== null) {
+      // Currently paused — stash the new list and apply on resume.
+      this._pausedShortcuts = sorted;
+      debug("[WaylandTracker] setShortcuts: paused, stash for resume");
+      return;
+    }
     if (
       sorted.length === this._shortcuts.length &&
       sorted.every((s, i) => s === this._shortcuts[i])
@@ -207,34 +225,94 @@ export class WaylandTracker extends EventEmitter {
       debug("[WaylandTracker] setShortcuts: unchanged, skip");
       return;
     }
-    this._shortcuts = sorted;
-    // Serialize against the initial start(): we must finish loading the
-    // initial empty script before we can unload+reload it, or we end up with
-    // two scripts loaded concurrently and the file content racing.
+    await this.applyShortcutsReload(sorted);
+  }
+
+  // Temporarily release every KGlobalAccel registration we hold so the
+  // user can type those keys (F5, Ctrl+D, Ctrl+Space, ...) into the
+  // settings UI's HotkeyInput fields. Without this, KWin intercepts the
+  // key at the compositor level — our handler fires and bails (isActive
+  // is false because the panel is up), and the keypress never reaches
+  // the InputProxy, so HotkeyInput's @keyup capture sees nothing.
+  //
+  // Called from OverlayWindow when InputProxy is shown.
+  async pauseShortcuts(): Promise<void> {
+    if (this._pausedShortcuts !== null) return;
+    debug("[WaylandTracker] pauseShortcuts");
+    this._pausedShortcuts = this._shortcuts;
+    await this.applyShortcutsReload([]);
+  }
+
+  async resumeShortcuts(): Promise<void> {
+    if (this._pausedShortcuts === null) return;
+    debug("[WaylandTracker] resumeShortcuts");
+    const restored = this._pausedShortcuts;
+    this._pausedShortcuts = null;
+    await this.applyShortcutsReload(restored);
+  }
+
+  // The reload path used by both setShortcuts and pause/resume. Skips
+  // the diff check and the paused-state guard that setShortcuts uses.
+  private async applyShortcutsReload(target: string[]): Promise<void> {
+    this._shortcuts = [...target].sort();
     if (this._startPromise) {
       await this._startPromise.catch(() => {});
     }
     if (!this.bus) {
-      debug("[WaylandTracker] setShortcuts: bus not ready, stash");
+      debug("[WaylandTracker] applyShortcutsReload: bus not ready");
       return;
     }
     if (this.reloading) {
-      debug("[WaylandTracker] setShortcuts: already reloading, drop");
+      debug("[WaylandTracker] applyShortcutsReload: already reloading, drop");
       return;
     }
     this.reloading = true;
     try {
-      debug("[WaylandTracker] reloading script...");
+      // Explicitly unregister every previously-held action. KWin doesn't
+      // clean up KGlobalAccel registrations on script unload, so without
+      // this the on-disk + in-memory grabs survive and silently block
+      // the new (potentially-empty) set from taking effect.
+      await this.clearPriorShortcuts();
       await this.unloadKwinScript();
       await this.loadKwinScript();
       debug(
-        `[WaylandTracker] reloaded scriptId=${this.scriptId} with ${this._shortcuts.length} shortcuts`,
-      );
-      this.logger.write(
-        `info [WaylandTracker] reloaded with ${this._shortcuts.length} shortcuts`,
+        `[WaylandTracker] applyShortcutsReload: scriptId=${this.scriptId} with ${this._shortcuts.length} shortcuts`,
       );
     } finally {
       this.reloading = false;
+    }
+  }
+
+  // Unregister every exiled-exchange-2-* action currently held by the
+  // kwin component. Used by applyShortcutsReload to ensure stale grabs
+  // from prior reloads / prior process runs don't survive into the new
+  // registration cycle.
+  private async clearPriorShortcuts(): Promise<void> {
+    if (!this.bus) return;
+    try {
+      const compObj = await this.bus.getProxyObject(
+        "org.kde.kglobalaccel",
+        "/component/kwin",
+      );
+      const compIface = compObj.getInterface(
+        "org.kde.kglobalaccel.Component",
+      );
+      const names = (await compIface.shortcutNames()) as string[];
+      const ours = names.filter((n) => n.startsWith("exiled-exchange-2-"));
+      if (ours.length === 0) return;
+      const accelObj = await this.bus.getProxyObject(
+        "org.kde.kglobalaccel",
+        "/kglobalaccel",
+      );
+      const accelIface = accelObj.getInterface("org.kde.KGlobalAccel");
+      for (const name of ours) {
+        await accelIface.unregister("kwin", name).catch(() => {});
+      }
+      debug(`[WaylandTracker] clearPriorShortcuts: unregistered ${ours.length}`);
+    } catch (err) {
+      debug(
+        `[WaylandTracker] clearPriorShortcuts failed: ${(err as Error).message}`,
+      );
     }
   }
 

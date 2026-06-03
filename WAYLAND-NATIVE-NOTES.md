@@ -89,21 +89,27 @@ The single Wayland-side backend. Three responsibilities:
 The KWin script itself does:
 
 - Iterates `workspace.windowList()` for an existing PoE2 (matches by `caption === "Path of Exile 2"` OR `resourceClass === "steam_app_2694490"`).
-- Subscribes to `workspace.windowAdded` for late-launched PoE2 and `workspace.windowActivated` for focus events.
+- Subscribes to `workspace.windowAdded` for late-launched PoE2.
+- **Focus tracking is done per-PoE-window via `w.activeChanged`**, not via the workspace-level `windowActivated` signal. Workspace-level activation fires for *any* window becoming active and proved unreliable around our InputProxy show/hide cycle (the proxy briefly becomes active, KWin sometimes doesn't emit a clean re-activation for PoE2 afterwards, intermediate daemon/notification surfaces leave us stuck reporting `Focus(false)` even when PoE2 was actually focused). Hooking `activeChanged` on the PoE2 window directly means we only flip our internal `isActive` state when PoE2's own active flag changes.
 - Subscribes to `workspace.cursorPosChanged` and pushes cursor coords through `callDBus(SERVICE, OBJECT, IFACE, "CursorPos", x, y)` whenever they change. Both `setInterval` and `Qt.createQmlObject` are unavailable in KWin's JS sandbox, so `cursorPosChanged` is the only mechanism that works.
 - Calls `registerShortcut(name, description, defaultKey, callback)` for each entry in the embedded `SHORTCUTS` array. Callback does `callDBus(..., "Hotkey", shortcut)`. KWin assigns action names `exiled-exchange-2-hk-N` and binds them under KGlobalAccel's `kwin` component.
+
+**Pause / resume KGlobalAccel grabs.** `pauseShortcuts()` and `resumeShortcuts()` temporarily release all `exiled-exchange-2-*` action registrations and reload them. Called by `OverlayWindow` from `assertOverlayActive` / `assertGameActive` (and `handlePoeWindowActiveChange` when PoE2 reclaims focus by other means). The reason: KWin intercepts globally-bound keys at the compositor level *regardless of which window has Wayland focus* — so when the user clicks into a HotkeyInput field in settings and presses F5 (the currently-bound /hideout key), KWin grabs F5, our handler fires and bails (`isActive=false` because the panel is up), and the keypress never reaches the InputProxy. HotkeyInput's `@keyup` capture sees nothing and the user can't rebind F5. Pausing while a panel is open hands those keys back to the OS-level input pipeline so they reach the proxy normally. Resume re-claims them when the panel closes.
+
+The pause path also explicitly **`clearPriorShortcuts()`** — DBus-unregisters every `exiled-exchange-2-*` action via `org.kde.KGlobalAccel.unregister` before reloading. This is necessary because KWin's `Scripting.unloadScript` does *not* automatically clean up the actions the script registered; without the explicit unregister, stale registrations from prior reloads (or prior process runs that exited unclean) survive and silently block the new set from taking effect. `applyShortcutsReload` (called by both `setShortcuts` and `pauseShortcuts`/`resumeShortcuts`) does this for every reload cycle.
 
 Race-condition hardening: `start()` returns a memoized `_startPromise`. `setShortcuts()` awaits it before doing its own unload+reload, so the initial script load and any subsequent reloads can't race on the same script file path.
 
 ### 3.2 New: `main/src/shortcuts/InputSynth.ts`
 
-Replaces `uiohook-napi` for *synthesis* (uiohook is kept for *listening*). On Linux all `keyTap` / `keyToggle` / `keySequenceByName` calls go to `ydotool key --key-delay 30 ...`; on other platforms they fall through to `uIOhook.keyTap` / `uIOhook.keyToggle` unchanged.
+Replaces `uiohook-napi` for *synthesis* (uiohook is kept for *listening*). On Linux all `keyTap` / `keyToggle` / `keyTapWithModsByName` / `keySequenceByName` calls go to `ydotool key --key-delay 30 ...`; on other platforms they fall through to `uIOhook.keyTap` / `uIOhook.keyToggle` unchanged.
 
 Key implementation choices:
 
 - **Batched into a single `ydotool` call per `process.nextTick`.** A small queue (`waylandQueue`) collects events fired in the same JS tick. `scheduleFlush` enqueues a `process.nextTick` callback that emits one `ydotool key ...` command for the whole sequence. This solves two problems: ordering (two concurrent `ydotool` child processes can race on the `ydotoold` socket) and atomicity (PoE2 only recognises `Ctrl+Alt+C` as the advanced-copy combo if the modifiers and `C` arrive as one clean event sequence).
 - **`--key-delay 30`** — empirically PoE2 drops the modifier interpretation if `--key-delay` is below ~20 ms. 30 ms is comfortable.
-- **`NAME_TO_EVDEV` table** maps our shortcut-string names (`Ctrl`, `Shift`, `Alt`, letters, digits, F1–F35, arrows, space, etc.) to Linux input event codes from `/usr/include/linux/input-event-codes.h`. Anything not in the table is silently dropped on Wayland.
+- **`NAME_TO_EVDEV` table** maps our shortcut-string names (`Ctrl`, `Shift`, `Alt`, `Meta`, letters, digits, F1–F35, arrows, space, etc.) to Linux input event codes from `/usr/include/linux/input-event-codes.h`. Anything not in the table is silently dropped on Wayland.
+- **`keyTapWithModsByName(name, mods)`** — taps a key while a set of modifiers is held (used by `text-box.ts` for `Ctrl+V` paste, `Ctrl+Enter`, etc.). On Wayland expands to the ordered `mods down → key down/up → mods up reverse` sequence and pushes it through the same batching queue. On other backends passes through to `uIOhook.keyTap(key, [modCodes])`.
 
 ### 3.3 New: `main/src/debug.ts`
 
@@ -168,6 +174,12 @@ const USE_COMPOSITOR_HOTKEYS = process.platform === "linux";
 ### 3.9 Modified: `main/src/shortcuts/HostClipboard.ts`
 
 `spawnSync("wl-paste", ["--no-newline"], ...)` replaces `clipboard.readText()` on Linux. `wl-copy` replaces `clipboard.writeText()`. Electron's Chromium clipboard reads the X11 selection which only syncs from Wayland on focus change; polling sees stale data. `wl-paste` reads the live Wayland selection directly.
+
+### 3.9b Modified: `main/src/shortcuts/text-box.ts`
+
+The chat-typing helpers (`typeInChat`, `stashSearch`) previously called `uIOhook.keyTap(Key.X, [Key.Ctrl])` directly. Wayland clients don't see uiohook's XTest synthesis, so the `/hideout` macros and stash searches produced no in-game key events. Rewritten to use `InputSynth`'s `keyTapByName` / `keyTapWithModsByName`, which route through ydotool on Wayland.
+
+The `paste-in-chat` send tail is also gated on Linux: upstream sends `Enter, Enter, ArrowUp, ArrowUp, Escape` after the message Enter — the second Enter assumes the chat closed on send and reopens it for the ArrowUp recall, the Escape closes it again. On Wayland/Proton PoE2 the chat *stays open* after Enter with the just-sent text still in the input, so the second Enter re-sends the same message and the final Escape then opens the game menu (because chat lost focus by that point). On Linux the whole tail is skipped — the first Enter sends, PoE2 closes the chat naturally.
 
 ### 3.10 Modified: `main/src/AppUpdater.ts`
 

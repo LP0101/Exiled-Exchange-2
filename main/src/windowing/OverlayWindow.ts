@@ -119,6 +119,12 @@ export class OverlayWindow {
       this.poeWindow.activateOverlay();
       this.poeWindow.isActive = false;
       this.inputProxy?.show();
+      // Release our global KGlobalAccel grabs so the user can type the
+      // currently-bound keys (F5, Ctrl+D, ...) into HotkeyInput fields
+      // in settings. KWin would otherwise intercept them at the
+      // compositor level and our handler would bail with isActive=false.
+      // Esc-to-dismiss still works because InputProxy handles it directly.
+      this.poeWindow.pauseShortcuts();
     }
   };
 
@@ -128,6 +134,7 @@ export class OverlayWindow {
       this.poeWindow.focusTarget();
       this.poeWindow.isActive = true;
       this.inputProxy?.hide();
+      this.poeWindow.resumeShortcuts();
     }
   };
 
@@ -207,8 +214,10 @@ export class OverlayWindow {
       this.isInteractable = false;
       // PoE2 reclaimed focus (e.g. user clicked into the game area) — drop
       // the proxy so it doesn't keep stealing keyboard focus on next focus
-      // change.
+      // change, and re-claim our KGlobalAccel grabs so in-game hotkeys
+      // start firing again.
       this.inputProxy?.hide();
+      this.poeWindow.resumeShortcuts();
     }
     this.server.sendEventTo("broadcast", {
       name: "MAIN->OVERLAY::focus-change",

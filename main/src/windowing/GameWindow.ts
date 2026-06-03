@@ -174,6 +174,30 @@ export class GameWindow extends EventEmitter {
     }
   }
 
+  // Temporarily release / restore our KGlobalAccel registrations so the
+  // user can type globally-bound keys (F5, Ctrl+D, ...) into the
+  // settings panel's HotkeyInput fields. Hooked from OverlayWindow's
+  // InputProxy show/hide.
+  pauseShortcuts(): void {
+    if (this._waylandTracker) {
+      this._waylandTracker.pauseShortcuts().catch((err: Error) => {
+        this.logger?.write(
+          `error [GameWindow] pauseShortcuts failed: ${err.message}`,
+        );
+      });
+    }
+  }
+
+  resumeShortcuts(): void {
+    if (this._waylandTracker) {
+      this._waylandTracker.resumeShortcuts().catch((err: Error) => {
+        this.logger?.write(
+          `error [GameWindow] resumeShortcuts failed: ${err.message}`,
+        );
+      });
+    }
+  }
+
   // Subscribe to "user pressed a registered hotkey" notifications coming from
   // the compositor. Fires with the shortcut string (e.g. "Ctrl+D"). No-op on
   // backends without compositor-side hotkey binding.

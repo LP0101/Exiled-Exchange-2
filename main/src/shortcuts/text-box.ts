@@ -1,5 +1,5 @@
-import { uIOhook, UiohookKey as Key } from "uiohook-napi";
 import process from "process";
+import { keyTapByName, keyTapWithModsByName } from "./InputSynth";
 import type { HostClipboard } from "./HostClipboard";
 import type { OverlayWindow } from "../windowing/OverlayWindow";
 
@@ -13,43 +13,56 @@ const AUTO_CLEAR = [
   "/", // Command
 ];
 
+// All key synthesis goes through InputSynth — on Wayland uiohook's XTest
+// path doesn't reach Wayland clients (PoE2 sees nothing). InputSynth
+// routes through ydotool on Linux and falls back to uiohook elsewhere.
 export function typeInChat(
   text: string,
   send: boolean,
   clipboard: HostClipboard,
 ) {
   clipboard.restoreShortly((clipboard) => {
-    const modifiers = process.platform === "darwin" ? [Key.Meta] : [Key.Ctrl];
+    const modKey = process.platform === "darwin" ? "Meta" : "Ctrl";
+    const modifiers = [modKey];
 
     if (text.startsWith(PLACEHOLDER_LAST)) {
       text = text.slice(`${PLACEHOLDER_LAST} `.length);
       clipboard.writeText(text);
-      uIOhook.keyTap(Key.Enter, modifiers);
+      keyTapWithModsByName("Enter", modifiers);
     } else if (text.endsWith(PLACEHOLDER_LAST)) {
       text = text.slice(0, -PLACEHOLDER_LAST.length);
       clipboard.writeText(text);
-      uIOhook.keyTap(Key.Enter, modifiers);
-      uIOhook.keyTap(Key.Home);
+      keyTapWithModsByName("Enter", modifiers);
+      keyTapByName("Home");
       // press twice to focus input when using controller
-      uIOhook.keyTap(Key.Home);
-      uIOhook.keyTap(Key.Delete);
+      keyTapByName("Home");
+      keyTapByName("Delete");
     } else {
       clipboard.writeText(text);
-      uIOhook.keyTap(Key.Enter);
+      keyTapByName("Enter");
       if (!AUTO_CLEAR.includes(text[0])) {
-        uIOhook.keyTap(Key.A, modifiers);
+        keyTapWithModsByName("A", modifiers);
       }
     }
 
-    uIOhook.keyTap(Key.V, modifiers);
+    keyTapWithModsByName("V", modifiers);
 
     if (send) {
-      uIOhook.keyTap(Key.Enter);
-      // restore the last chat
-      uIOhook.keyTap(Key.Enter);
-      uIOhook.keyTap(Key.ArrowUp);
-      uIOhook.keyTap(Key.ArrowUp);
-      uIOhook.keyTap(Key.Escape);
+      keyTapByName("Enter");
+      // Upstream's "restore the last chat" tail (Enter, ArrowUp×2,
+      // Escape) is a Windows/X11 PoE2 dance that assumes Enter closes
+      // chat after sending. On Wayland/Proton PoE2 the chat stays open
+      // and the sent text is retained in the input, so each Enter
+      // re-sends the same command. Escape then opens the game menu
+      // (because chat is no longer the focused widget by that point).
+      // Skip the whole tail on Linux — Enter alone sends and the game
+      // closes chat naturally.
+      if (process.platform !== "linux") {
+        keyTapByName("Enter");
+        keyTapByName("ArrowUp");
+        keyTapByName("ArrowUp");
+        keyTapByName("Escape");
+      }
     }
   });
 }
@@ -62,11 +75,12 @@ export function stashSearch(
   clipboard.restoreShortly((clipboard) => {
     overlay.assertGameActive();
     clipboard.writeText(text);
-    uIOhook.keyTap(Key.F, [Key.Ctrl]);
+    keyTapWithModsByName("F", ["Ctrl"]);
 
-    uIOhook.keyTap(Key.V, [
-      process.platform === "darwin" ? Key.Meta : Key.Ctrl,
-    ]);
-    uIOhook.keyTap(Key.Enter);
+    keyTapWithModsByName(
+      "V",
+      [process.platform === "darwin" ? "Meta" : "Ctrl"],
+    );
+    keyTapByName("Enter");
   });
 }

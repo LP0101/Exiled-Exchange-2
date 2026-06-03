@@ -24,6 +24,7 @@ const NAME_TO_EVDEV: Record<string, number> = {
   PageUp: 104, PageDown: 109,
   F1: 59, F2: 60, F3: 61, F4: 62, F5: 63, F6: 64,
   F7: 65, F8: 66, F9: 67, F10: 68, F11: 87, F12: 88,
+  Meta: 125,
 };
 
 export interface KeyEvent {
@@ -124,6 +125,29 @@ export function keyTapByName(name: string): void {
   }
   const k = uiohookKey(name);
   if (k !== undefined) uIOhook.keyTap(k);
+}
+
+// Tap a key while a set of modifiers is held. On Wayland, expands into an
+// ordered sequence (mods down → key down/up → mods up reverse) and pushes
+// it through the ydotool batching queue. On other backends, passes through
+// to uIOhook.keyTap(key, [mod1, mod2, ...]).
+export function keyTapWithModsByName(name: string, mods: string[]): void {
+  if (WAYLAND) {
+    const events: KeyEvent[] = [];
+    for (const m of mods) events.push({ name: m, state: "down" });
+    events.push({ name, state: "down" });
+    events.push({ name, state: "up" });
+    for (const m of [...mods].reverse()) events.push({ name: m, state: "up" });
+    queueWayland(events);
+    return;
+  }
+  const modCodes: number[] = [];
+  for (const m of mods) {
+    const c = uiohookKey(m);
+    if (c !== undefined) modCodes.push(c);
+  }
+  const k = uiohookKey(name);
+  if (k !== undefined) uIOhook.keyTap(k, modCodes);
 }
 
 export function keySequenceByName(events: KeyEvent[]): void {
